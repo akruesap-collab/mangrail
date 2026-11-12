@@ -148,6 +148,8 @@ select.select-field{appearance:none;-webkit-appearance:none;background-image:url
 @media (max-width:520px){.task-card{flex-direction:column;align-items:flex-start}.task-card-side{width:100%;justify-content:space-between}}
 @media (max-width:480px){.app-main{padding:16px 12px 10px}.header-top{padding:14px 16px}.header-banner{padding:18px 16px 22px}.mission-card-body{padding:18px 16px 22px}.task-pill{padding:9px 14px;font-size:13px}.log-grid{grid-template-columns:1fr}.filter-row{flex-direction:column}.filter-row input{min-width:0}}
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -183,6 +185,7 @@ select.select-field{appearance:none;-webkit-appearance:none;background-image:url
 <main class="app-main">
   <section id="page-dashboard" class="page active">
     <button class="btn-ghost notif-btn" id="notif-btn" data-action="ask-notif">🔔 เปิดการแจ้งเตือนของเครื่อง</button>
+    <div class="panel"><div class="panel-head"><h2>☁️ ซิงค์ข้ามเครื่อง</h2></div><div class="filter-bar"><div class="filter-row"><input type="text" id="sync-code" placeholder="รหัสซิงค์ (ใช้รหัสเดียวกันทุกเครื่อง)" autocapitalize="off" autocomplete="off" autocorrect="off"></div><div class="filter-row"><button class="btn-sm btn-green" id="sync-connect" type="button">เชื่อมต่อ</button><button class="btn-sm btn-outline" id="sync-gen" type="button">สร้างรหัสใหม่</button><button class="btn-sm btn-red" id="sync-off" type="button">ตัดการเชื่อมต่อ</button></div><div id="sync-status" class="task-meta">ยังไม่ได้เชื่อมต่อ</div></div></div>
     <div class="panel"><div class="panel-head"><h2>สถานะรายวิชา</h2></div><div id="status-grid" class="status-grid"></div></div>
     <div class="panel"><div class="panel-head"><h2>ขบวนรถกำลังจะล่าช้า</h2><span id="count-due-soon" class="count-badge">0</span></div><div id="list-due-soon" class="card-list"></div></div>
     <div class="panel"><div class="panel-head"><h2>เตรียมงานรถ / รอเวลาออก</h2><span id="count-pending" class="count-badge">0</span></div><div id="list-pending" class="card-list"></div></div>
@@ -292,7 +295,7 @@ function loadTasks(){
  try{var r=localStorage.getItem(KEY);tasks=r?JSON.parse(r):[];if(!Array.isArray(tasks))tasks=[]}catch(e){tasks=[]}
 }
 function saveTasks(){
- try{localStorage.setItem(KEY,JSON.stringify(tasks));return true}
+ try{localStorage.setItem(KEY,JSON.stringify(tasks));pushCloud();return true}
  catch(e){showToast("บันทึกลงเครื่องไม่ได้ (ปิดโหมดส่วนตัวหรือพื้นที่เต็ม)",true);return false}
 }
 
@@ -504,6 +507,65 @@ function checkAlerts(){
  beep();renderAll();
 }
 
+/* ---------- ซิงค์ข้ามเครื่อง (Firebase Firestore) ---------- */
+var FIREBASE_CONFIG={apiKey:"AIzaSyCL6VfUuDlQw7yYLLFUwSsyTq3cqlEXNEE",authDomain:"mangrail-sync.firebaseapp.com",projectId:"mangrail-sync",storageBucket:"mangrail-sync.firebasestorage.app",messagingSenderId:"702862158075",appId:"1:702862158075:web:a12971fe45832940c1285e"};
+var SYNC_KEY="mr_mangrail_sync_code",db=null,unsub=null,syncCode="";
+function syncStatus(t,ok){var e=$("sync-status");if(e){e.textContent=t;e.style.color=ok?"var(--green)":"var(--muted)"}}
+function cloudReady(){return typeof firebase!=="undefined"&&FIREBASE_CONFIG.apiKey&&FIREBASE_CONFIG.apiKey!=="ใส่ที่นี่"}
+function pushCloud(){
+ if(!db||!syncCode)return;
+ db.collection("mangrail").doc(syncCode).set({tasks:JSON.stringify(tasks),updatedAt:Date.now()})
+  .then(function(){syncStatus("✓ ซิงค์แล้ว "+fClock(new Date()),true)})
+  .catch(function(e){syncStatus("ซิงค์ไม่สำเร็จ: "+(e&&e.code||e))});
+}
+function connectSync(code){
+ code=String(code||"").trim().toLowerCase();
+ if(code.length<8||!/^[a-z0-9_-]+$/.test(code)){showToast("รหัสต้องยาวอย่างน้อย 8 ตัว (a-z, 0-9, - _)",true);return}
+ if(!cloudReady()){syncStatus("ยังไม่ได้ใส่ค่า Firebase ในไฟล์",false);showToast("ยังไม่ได้ตั้งค่า Firebase",true);return}
+ try{
+  if(!firebase.apps.length)firebase.initializeApp(FIREBASE_CONFIG);
+  db=firebase.firestore();
+ }catch(e){syncStatus("เริ่มระบบซิงค์ไม่ได้: "+e.message);return}
+ if(unsub){unsub();unsub=null}
+ syncCode=code;try{localStorage.setItem(SYNC_KEY,code)}catch(e){}
+ $("sync-code").value=code;syncStatus("กำลังเชื่อมต่อ...",false);
+ var first=true;
+ unsub=db.collection("mangrail").doc(code).onSnapshot(function(snap){
+  if(snap.metadata.hasPendingWrites)return;
+  var needPush=false;
+  if(snap.exists){
+   var cloud=[];try{cloud=JSON.parse(snap.data().tasks)||[]}catch(e){}
+   if(first){
+    var ids={};cloud.forEach(function(t){ids[t.id]=1});
+    tasks.forEach(function(t){if(!ids[t.id]){cloud.push(t);needPush=true}});
+   }
+   tasks=cloud;
+  }else if(first&&tasks.length){needPush=true}
+  first=false;
+  try{localStorage.setItem(KEY,JSON.stringify(tasks))}catch(e){}
+  renderAll();
+  if(needPush||!snap.exists)pushCloud();else syncStatus("✓ ซิงค์แล้ว "+fClock(new Date()),true);
+ },function(e){syncStatus("เชื่อมต่อไม่ได้: "+(e&&e.code||e))});
+}
+function disconnectSync(){
+ if(unsub){unsub();unsub=null}
+ db=null;syncCode="";try{localStorage.removeItem(SYNC_KEY)}catch(e){}
+ $("sync-code").value="";syncStatus("ยังไม่ได้เชื่อมต่อ",false);showToast("ตัดการเชื่อมต่อแล้ว (ข้อมูลในเครื่องยังอยู่)");
+}
+function genCode(){
+ var a="abcdefghjkmnpqrstuvwxyz23456789",o="",r=new Uint8Array(16);
+ (window.crypto||window.msCrypto).getRandomValues(r);
+ for(var i=0;i<16;i++)o+=a[r[i]%a.length];
+ $("sync-code").value=o;showToast("สร้างรหัสแล้ว กด เชื่อมต่อ แล้วจดรหัสไปใส่อีกเครื่อง");
+}
+function initSync(){
+ $("sync-connect").addEventListener("click",function(){connectSync($("sync-code").value)});
+ $("sync-gen").addEventListener("click",genCode);
+ $("sync-off").addEventListener("click",disconnectSync);
+ var c="";try{c=localStorage.getItem(SYNC_KEY)||""}catch(e){}
+ if(c)connectSync(c);
+}
+
 /* ---------- clock & events ---------- */
 function tick(){var n=new Date();$("clock-time").textContent=fClock(n);$("clock-date").textContent=fBig(n);$("clock-asof").textContent="ข้อมูล ณ เวลา "+fClock(n)}
 function typing(){var a=document.activeElement;return state.page==="add"&&a&&(a.tagName==="INPUT"||a.tagName==="TEXTAREA"||a.tagName==="SELECT")}
@@ -551,7 +613,7 @@ function init(){
  buildSelect();bind();loadTasks();resetForm();tick();notifState();
  setInterval(tick,1000);
  setInterval(function(){checkAlerts();if(!typing())renderAll()},30000);
- renderAll();checkAlerts();
+ renderAll();checkAlerts();initSync();
 }
 document.addEventListener("DOMContentLoaded",init);
 })();
